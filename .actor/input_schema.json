@@ -23,8 +23,8 @@
       "type": "integer",
       "description": "Maximum number of reviews to save.",
       "minimum": 1,
-      "default": 50,
-      "prefill": 50,
+      "default": 20,
+      "prefill": 20,
       "editor": "number"
     },
     "max_pages": {
@@ -32,8 +32,8 @@
       "type": "integer",
       "description": "Maximum number of review pages to fetch.",
       "minimum": 1,
-      "default": 10,
-      "prefill": 10,
+      "default": 5,
+      "prefill": 5,
       "editor": "number"
     },
     "sort_by": {
