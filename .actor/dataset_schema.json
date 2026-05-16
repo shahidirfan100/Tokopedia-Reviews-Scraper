@@ -1,0 +1,75 @@
+{
+  "actorSpecification": 1,
+  "fields": {
+    "type": "object",
+    "properties": {
+      "product_id": { "title": "Product ID", "type": "string" },
+      "product_url": { "title": "Product URL", "type": "string" },
+      "product_name": { "title": "Product Name", "type": "string" },
+      "shop_name": { "title": "Shop Name", "type": "string" },
+      "review_id": { "title": "Review ID", "type": "string" },
+      "page": { "title": "Page", "type": "integer" },
+      "position": { "title": "Position", "type": "integer" },
+      "rating": { "title": "Rating", "type": "number" },
+      "variant_name": { "title": "Variant", "type": "string" },
+      "review_text": { "title": "Review", "type": "string" },
+      "buyer_name": { "title": "Buyer", "type": "string" },
+      "likes_count": { "title": "Likes", "type": "integer" },
+      "images_count": { "title": "Images", "type": "integer" },
+      "videos_count": { "title": "Videos", "type": "integer" },
+      "review_time_relative": { "title": "Relative Time", "type": "string" },
+      "review_time_iso": { "title": "Review Time", "type": "string", "format": "date-time" },
+      "sort_by": { "title": "Sort", "type": "string" },
+      "source_type": { "title": "Source", "type": "string" },
+      "fetched_at": { "title": "Fetched At", "type": "string", "format": "date-time" }
+    }
+  },
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "product_id",
+          "product_name",
+          "review_id",
+          "page",
+          "position",
+          "rating",
+          "variant_name",
+          "review_text",
+          "buyer_name",
+          "likes_count",
+          "images_count",
+          "videos_count",
+          "review_time_relative",
+          "sort_by",
+          "source_type",
+          "product_url",
+          "fetched_at"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "product_id": { "label": "Product ID", "format": "text" },
+          "product_name": { "label": "Product", "format": "text" },
+          "review_id": { "label": "Review ID", "format": "text" },
+          "page": { "label": "Page", "format": "number" },
+          "position": { "label": "Position", "format": "number" },
+          "rating": { "label": "Rating", "format": "number" },
+          "variant_name": { "label": "Variant", "format": "text" },
+          "review_text": { "label": "Review", "format": "text" },
+          "buyer_name": { "label": "Buyer", "format": "text" },
+          "likes_count": { "label": "Likes", "format": "number" },
+          "images_count": { "label": "Images", "format": "number" },
+          "videos_count": { "label": "Videos", "format": "number" },
+          "review_time_relative": { "label": "Relative Time", "format": "text" },
+          "sort_by": { "label": "Sort", "format": "text" },
+          "source_type": { "label": "Source", "format": "text" },
+          "product_url": { "label": "Product URL", "format": "link" },
+          "fetched_at": { "label": "Fetched At", "format": "date" }
+        }
+      }
+    }
+  }
+}

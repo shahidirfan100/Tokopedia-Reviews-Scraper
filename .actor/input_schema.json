@@ -1,0 +1,65 @@
+{
+  "title": "Tokopedia Reviews Scraper",
+  "description": "Collect customer reviews from Tokopedia product pages.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "product_url": {
+      "title": "Product URL",
+      "type": "string",
+      "description": "Tokopedia product URL. Recommended input.",
+      "editor": "textfield",
+      "prefill": "https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327"
+    },
+    "product_id": {
+      "title": "Product ID",
+      "type": "string",
+      "description": "Direct Tokopedia product ID. If provided, this takes priority over Product URL.",
+      "editor": "textfield",
+      "prefill": ""
+    },
+    "results_wanted": {
+      "title": "Maximum reviews",
+      "type": "integer",
+      "description": "Maximum number of reviews to save.",
+      "minimum": 1,
+      "default": 50,
+      "prefill": 50,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum pages",
+      "type": "integer",
+      "description": "Maximum number of review pages to fetch.",
+      "minimum": 1,
+      "default": 10,
+      "prefill": 10,
+      "editor": "number"
+    },
+    "sort_by": {
+      "title": "Sort by",
+      "type": "string",
+      "description": "Review sorting order.",
+      "enum": [
+        "informative_score desc",
+        "create_time desc",
+        "rating desc",
+        "rating asc"
+      ],
+      "editor": "select",
+      "default": "informative_score desc",
+      "prefill": "informative_score desc"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Optional proxy settings for request routing.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": false
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
