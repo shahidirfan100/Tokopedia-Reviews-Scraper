@@ -2,27 +2,36 @@ import { readFile } from 'node:fs/promises';
 
 import { Actor, log } from 'apify';
 import { Dataset, sleep } from 'crawlee';
-import { gotScraping } from 'got-scraping';
+import { Impit } from 'impit';
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
 
 const TOKOPEDIA_GQL_BASE = 'https://gql.tokopedia.com/graphql';
-const DEFAULT_PRODUCT_URL = 'https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327';
+const DEFAULT_PRODUCT_URL =
+    'https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327';
 
-const PRODUCT_REVIEW_LIST_QUERY = 'query productReviewList($productID:String!,$page:Int!,$limit:Int!,$sortBy:String,$filterBy:String){productrevGetProductReviewList( productID:$productID,page:$page,limit:$limit,sortBy:$sortBy,filterBy:$filterBy,){productID list{id:feedbackID variantName message productRating reviewCreateTime reviewCreateTimestamp isReportable isAnonymous imageAttachments{attachmentID imageThumbnailUrl imageUrl}videoAttachments{attachmentID videoUrl}reviewResponse{message createTime}user{userID fullName image url}likeDislike{totalLike likeStatus}}shop{shopID name url image}hasNext totalReviews}}';
-const MINI_PRODUCT_INFO_QUERY = 'query getMiniProductInfo($productURL:String!,$userLocation:productrevUserLocation){productrevGetMiniProductInfo(productID:"",productURL:$productURL,userLocation:$userLocation){product{id name thumbnailURL originalPrice:price status stock priceFmt}shop{id name badgeURL isTokoNow}totalSoldFmt totalDiscussion}}';
+const PRODUCT_REVIEW_LIST_QUERY =
+    'query productReviewList($productID:String!,$page:Int!,$limit:Int!,$sortBy:String,$filterBy:String){productrevGetProductReviewList( productID:$productID,page:$page,limit:$limit,sortBy:$sortBy,filterBy:$filterBy,){productID list{id:feedbackID variantName message productRating reviewCreateTime reviewCreateTimestamp isReportable isAnonymous imageAttachments{attachmentID imageThumbnailUrl imageUrl}videoAttachments{attachmentID videoUrl}reviewResponse{message createTime}user{userID fullName image url}likeDislike{totalLike likeStatus}}shop{shopID name url image}hasNext totalReviews}}';
+const MINI_PRODUCT_INFO_QUERY =
+    'query getMiniProductInfo($productURL:String!,$userLocation:productrevUserLocation){productrevGetMiniProductInfo(productID:"",productURL:$productURL,userLocation:$userLocation){product{id name thumbnailURL originalPrice:price status stock priceFmt}shop{id name badgeURL isTokoNow}totalSoldFmt totalDiscussion}}';
 
 const BASE_HEADERS = {
-    accept: '*/*',
     'content-type': 'application/json',
     origin: 'https://www.tokopedia.com',
     referer: 'https://www.tokopedia.com/',
     'x-source': 'tokopedia-lite',
     'x-tkpd-lite-service': 'zeus',
-    'x-device': 'desktop-0.0',
+    'x-device': 'mobile-0.0',
     'x-dark-mode': 'false',
 };
+const HTTP1_FALLBACK_HEADERS = {
+    ...BASE_HEADERS,
+    'user-agent':
+        'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+    'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+};
 
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
 const REVIEWS_PER_PAGE = 10;
+const REQUEST_RETRIES = 4;
 
 await Actor.init();
 
@@ -38,9 +47,7 @@ const isBlank = (value) => {
 
 const removeEmptyValuesDeep = (value) => {
     if (Array.isArray(value)) {
-        const cleaned = value
-            .map(removeEmptyValuesDeep)
-            .filter((item) => !isBlank(item));
+        const cleaned = value.map(removeEmptyValuesDeep).filter((item) => !isBlank(item));
         return cleaned.length ? cleaned : undefined;
     }
 
@@ -130,63 +137,131 @@ const loadInputFallback = async () => {
     }
 };
 
-const requestGraphql = async ({ endpointName, payload, proxyUrl, timeoutMs = 45000 }) => {
+const createHttpClient = (proxyUrl) => {
+    const state = {
+        useHttp1Fallback: false,
+        loggedHttp1Fallback: false,
+    };
+
+    return {
+        impit: new Impit({
+            browser: 'chrome',
+            ignoreTlsErrors: true,
+            ...(proxyUrl && { proxyUrl }),
+        }),
+        http1Dispatcher: proxyUrl ? new ProxyAgent(proxyUrl) : undefined,
+        shouldUseHttp1Fallback: () => state.useHttp1Fallback,
+        activateHttp1Fallback: () => {
+            state.useHttp1Fallback = true;
+        },
+        shouldLogHttp1Fallback: () => {
+            if (state.loggedHttp1Fallback) return false;
+            state.loggedHttp1Fallback = true;
+            return true;
+        },
+    };
+};
+
+const isImpitHttp2Reset = (error) => {
+    const message = String(error?.message || error || '');
+    return message.includes('Http2') && message.includes('Reset');
+};
+
+const fetchGraphql = async ({ client, url, payload, signal, timeoutMs }) => {
+    if (!client.shouldUseHttp1Fallback()) {
+        try {
+            return await client.impit.fetch(url, {
+                method: 'POST',
+                headers: BASE_HEADERS,
+                body: JSON.stringify(payload),
+                signal,
+                timeout: timeoutMs,
+            });
+        } catch (error) {
+            if (!isImpitHttp2Reset(error)) throw error;
+            client.activateHttp1Fallback();
+            if (client.shouldLogHttp1Fallback()) {
+                log.warning(
+                    'Tokopedia reset the impit HTTP/2 stream. Switching this run to HTTP/1-compatible mobile-web requests.',
+                );
+            }
+        }
+    }
+
+    return await undiciFetch(url, {
+        method: 'POST',
+        headers: HTTP1_FALLBACK_HEADERS,
+        body: JSON.stringify(payload),
+        signal,
+        ...(client.http1Dispatcher && { dispatcher: client.http1Dispatcher }),
+    });
+};
+
+const parseGraphqlResponse = async ({ response, endpointName }) => {
+    const contentType = response.headers.get('content-type') || '';
+    const body = contentType.includes('application/json') ? await response.json() : JSON.parse(await response.text());
+
+    if (Array.isArray(body)) {
+        if (body[0]?.errors?.length) {
+            throw new Error(`Endpoint ${endpointName} error: ${body[0].errors[0]?.message || 'Unknown error'}`);
+        }
+        return body[0]?.data ?? null;
+    }
+
+    if (body?.errors?.length) {
+        throw new Error(`Endpoint ${endpointName} error: ${body.errors[0]?.message || 'Unknown error'}`);
+    }
+
+    return body?.data ?? null;
+};
+
+const requestGraphql = async ({ client, endpointName, payload, timeoutMs = 45000 }) => {
     let lastError;
 
-    for (let attempt = 1; attempt <= 4; attempt++) {
+    for (let attempt = 1; attempt <= REQUEST_RETRIES; attempt++) {
+        const abortController = new AbortController();
+        const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+
         try {
-            const response = await gotScraping({
+            const response = await fetchGraphql({
+                client,
                 url: `${TOKOPEDIA_GQL_BASE}/${endpointName}`,
-                method: 'POST',
-                headers: {
-                    ...BASE_HEADERS,
-                    'user-agent': DEFAULT_USER_AGENT,
-                },
-                proxyUrl,
-                retry: { limit: 0 },
-                timeout: { request: timeoutMs },
-                http2: false,
-                responseType: 'json',
-                body: JSON.stringify(payload),
-                throwHttpErrors: false,
+                payload,
+                signal: abortController.signal,
+                timeoutMs,
             });
 
-            if (response.statusCode >= 400) {
-                throw new Error(`Endpoint ${endpointName} returned status ${response.statusCode}`);
+            if (response.status === 429) {
+                throw new Error(`Endpoint ${endpointName} was rate limited with status 429`);
             }
 
-            const { body } = response;
-            if (Array.isArray(body)) {
-                if (body[0]?.errors?.length) {
-                    throw new Error(`Endpoint ${endpointName} error: ${body[0].errors[0]?.message || 'Unknown error'}`);
-                }
-                return body[0]?.data ?? null;
+            if (response.status >= 400) {
+                throw new Error(`Endpoint ${endpointName} returned status ${response.status}`);
             }
 
-            if (body?.errors?.length) {
-                throw new Error(`Endpoint ${endpointName} error: ${body.errors[0]?.message || 'Unknown error'}`);
-            }
-
-            return body?.data ?? null;
+            return await parseGraphqlResponse({ response, endpointName });
         } catch (error) {
             lastError = error;
-            if (attempt >= 4) break;
-            await sleep(500 * attempt + Math.floor(Math.random() * 400));
+            if (attempt >= REQUEST_RETRIES) break;
+            const backoffMs = error?.message?.includes('429')
+                ? 900 * attempt + Math.floor(Math.random() * 500)
+                : 350 * attempt + Math.floor(Math.random() * 300);
+            await sleep(backoffMs);
+        } finally {
+            clearTimeout(timeout);
         }
     }
 
     throw lastError;
 };
 
-const resolveProductFromUrl = async ({ productUrl, proxyConfiguration }) => {
+const resolveProductFromUrl = async ({ client, productUrl }) => {
     const normalizedUrl = normalizeProductUrl(productUrl);
     if (!normalizedUrl) {
         throw new Error('Invalid Tokopedia product URL.');
     }
 
     const directId = extractProductIdFromUrl(normalizedUrl);
-    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl('tokopedia-mini-product') : undefined;
-
     try {
         const payload = {
             operationName: 'getMiniProductInfo',
@@ -198,9 +273,9 @@ const resolveProductFromUrl = async ({ productUrl, proxyConfiguration }) => {
         };
 
         const data = await requestGraphql({
+            client,
             endpointName: 'getMiniProductInfo',
             payload,
-            proxyUrl,
             timeoutMs: 60000,
         });
 
@@ -239,7 +314,7 @@ const resolveProductFromUrl = async ({ productUrl, proxyConfiguration }) => {
     }
 };
 
-const fetchReviewsPage = async ({ productId, page, limit, sortBy, proxyConfiguration }) => {
+const fetchReviewsPage = async ({ client, productId, page, limit, sortBy }) => {
     const payload = {
         operationName: 'productReviewList',
         variables: {
@@ -252,8 +327,7 @@ const fetchReviewsPage = async ({ productId, page, limit, sortBy, proxyConfigura
         query: PRODUCT_REVIEW_LIST_QUERY,
     };
 
-    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl(`tokopedia-review-${page}`) : undefined;
-    const data = await requestGraphql({ endpointName: 'productReviewList', payload, proxyUrl });
+    const data = await requestGraphql({ client, endpointName: 'productReviewList', payload });
     return data?.productrevGetProductReviewList || null;
 };
 
@@ -267,9 +341,7 @@ const normalizeReviewItem = ({ rawReview, page, position, productContext, sortBy
         .map((image) => cleanUrl(image?.imageUrl) || cleanUrl(image?.imageThumbnailUrl))
         .filter(Boolean);
 
-    const videoUrls = (rawReview?.videoAttachments || [])
-        .map((video) => cleanUrl(video?.videoUrl))
-        .filter(Boolean);
+    const videoUrls = (rawReview?.videoAttachments || []).map((video) => cleanUrl(video?.videoUrl)).filter(Boolean);
 
     const out = {
         product_id: productContext.productId,
@@ -296,7 +368,9 @@ const normalizeReviewItem = ({ rawReview, page, position, productContext, sortBy
         buyer_profile_url: cleanUrl(rawReview?.user?.url),
         is_anonymous: rawReview?.isAnonymous,
         is_reportable: rawReview?.isReportable,
-        likes_count: Number.isFinite(Number(rawReview?.likeDislike?.totalLike)) ? Number(rawReview.likeDislike.totalLike) : undefined,
+        likes_count: Number.isFinite(Number(rawReview?.likeDislike?.totalLike))
+            ? Number(rawReview.likeDislike.totalLike)
+            : undefined,
         images_count: imageUrls.length,
         videos_count: videoUrls.length,
         image_urls: imageUrls,
@@ -323,12 +397,13 @@ try {
     const proxyConfiguration = input.proxyConfiguration
         ? await Actor.createProxyConfiguration(input.proxyConfiguration)
         : undefined;
+    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl('tokopedia-session') : undefined;
+    const client = createHttpClient(proxyUrl);
 
     const resultsWanted = toPositiveInt(input.results_wanted, 50);
     const maxPages = toPositiveInt(input.max_pages, 10);
-    const sortBy = typeof input.sort_by === 'string' && input.sort_by.trim()
-        ? input.sort_by.trim()
-        : 'informative_score desc';
+    const sortBy =
+        typeof input.sort_by === 'string' && input.sort_by.trim() ? input.sort_by.trim() : 'informative_score desc';
 
     const providedProductId = String(input.product_id || '').trim();
     const providedProductUrl = normalizeProductUrl(input.product_url || input.url || input.startUrl || null);
@@ -353,8 +428,8 @@ try {
         };
     } else {
         productContext = await resolveProductFromUrl({
+            client,
             productUrl: providedProductUrl || DEFAULT_PRODUCT_URL,
-            proxyConfiguration,
         });
     }
 
@@ -372,15 +447,17 @@ try {
 
     for (let page = 1; page <= maxPages && saved < resultsWanted && hasNext; page++) {
         const reviewResult = await fetchReviewsPage({
+            client,
             productId: productContext.productId,
             page,
             limit: REVIEWS_PER_PAGE,
             sortBy,
-            proxyConfiguration,
         });
 
         const list = Array.isArray(reviewResult?.list) ? reviewResult.list : [];
-        totalReviews = Number.isFinite(Number(reviewResult?.totalReviews)) ? Number(reviewResult.totalReviews) : totalReviews;
+        totalReviews = Number.isFinite(Number(reviewResult?.totalReviews))
+            ? Number(reviewResult.totalReviews)
+            : totalReviews;
         hasNext = Boolean(reviewResult?.hasNext);
 
         if (!list.length) {
@@ -392,14 +469,16 @@ try {
         const sliced = list.slice(0, remaining);
 
         const mapped = sliced
-            .map((review, index) => normalizeReviewItem({
-                rawReview: review,
-                page,
-                position: ((page - 1) * REVIEWS_PER_PAGE) + index + 1,
-                productContext,
-                sortBy,
-                sourceType,
-            }))
+            .map((review, index) =>
+                normalizeReviewItem({
+                    rawReview: review,
+                    page,
+                    position: (page - 1) * REVIEWS_PER_PAGE + index + 1,
+                    productContext,
+                    sortBy,
+                    sourceType,
+                }),
+            )
             .filter(Boolean);
 
         if (mapped.length) {
@@ -413,7 +492,9 @@ try {
         await sleep(650 + Math.floor(Math.random() * 500));
     }
 
-    log.info(`Finished. Saved ${saved} reviews${totalReviews !== null ? ` (total available: ${totalReviews})` : ''}. Product ID: ${productContext.productId}`);
+    log.info(
+        `Finished. Saved ${saved} reviews${totalReviews !== null ? ` (total available: ${totalReviews})` : ''}. Product ID: ${productContext.productId}`,
+    );
 } catch (error) {
     runError = error;
     log.exception(error, 'Run failed.');
