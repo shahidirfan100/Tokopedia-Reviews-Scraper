@@ -63,7 +63,6 @@ Input priority when both are filled:
 | `results_wanted` | Integer | No | `20` | Maximum number of reviews to save. |
 | `max_pages` | Integer | No | `5` | Maximum number of review pages to fetch. |
 | `sort_by` | String | No | `informative_score desc` | Review sort order. Options: `informative_score desc`, `create_time desc`, `rating desc`, `rating asc`. |
-| `proxyConfiguration` | Object | No | `{ "useApifyProxy": false }` | Optional proxy settings for request routing. |
 
 ## Usage Examples
 
@@ -149,7 +148,7 @@ Focus on positive feedback to study what buyers appreciate most:
 - Start with `results_wanted` between 20 and 50 to validate output before running larger collections.
 - Use product URLs that already have visible customer reviews. Products with no reviews will return an empty dataset.
 - For scheduled or automated pipelines, prefer `product_id` because it targets the product directly and does not depend on URL formatting.
-- Enable proxies for higher stability in large or frequent runs. Proxy configuration can be added from the Apify Console.
+
 - Combine a sensible `max_pages` limit with scheduling so recurring runs stay predictable and low-cost.
 - Some reviews have no text, images, or timestamps. Missing fields are expected when the source does not publish that information, and empty values are removed from the dataset.
 - Tokopedia pages and review formats can change. If a run stops returning data, report the issue through the Issues tab so it can be fixed.

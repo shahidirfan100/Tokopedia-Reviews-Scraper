@@ -3,11 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { Actor, log } from 'apify';
 import { Dataset, sleep } from 'crawlee';
 import { Impit } from 'impit';
-import { fetch as undiciFetch, ProxyAgent } from 'undici';
+import { fetch as undiciFetch } from 'undici';
 
 const TOKOPEDIA_GQL_BASE = 'https://gql.tokopedia.com/graphql';
-const DEFAULT_PRODUCT_URL =
-    'https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327';
 
 const PRODUCT_REVIEW_LIST_QUERY =
     'query productReviewList($productID:String!,$page:Int!,$limit:Int!,$sortBy:String,$filterBy:String){productrevGetProductReviewList( productID:$productID,page:$page,limit:$limit,sortBy:$sortBy,filterBy:$filterBy,){productID list{id:feedbackID variantName message productRating reviewCreateTime reviewCreateTimestamp isReportable isAnonymous imageAttachments{attachmentID imageThumbnailUrl imageUrl}videoAttachments{attachmentID videoUrl}reviewResponse{message createTime}user{userID fullName image url}likeDislike{totalLike likeStatus}}shop{shopID name url image}hasNext totalReviews}}';
@@ -32,6 +30,8 @@ const HTTP1_FALLBACK_HEADERS = {
 
 const REVIEWS_PER_PAGE = 10;
 const REQUEST_RETRIES = 4;
+const RETRY_MAX_DELAY_MS = 5000;
+const SEARCH_FIELDS = ['product_id', 'product_url', 'url', 'startUrl'];
 
 await Actor.init();
 
@@ -115,17 +115,18 @@ const extractProductIdFromUrl = (productUrl) => {
     }
 };
 
-const hasUserProvidedValues = (input) => {
+const hasUserProvidedSearch = (input) => {
     if (!isRecord(input)) return false;
 
-    return Object.values(input).some((value) => {
-        if (value === null || value === undefined) return false;
-        if (typeof value === 'string') return value.trim() !== '';
-        if (Array.isArray(value)) return value.length > 0;
-        if (isRecord(value)) return Object.keys(value).length > 0;
-        return true;
-    });
+    return SEARCH_FIELDS.some((field) => !isBlank(input[field]));
 };
+
+const mergeInput = (fallbackInput, rawInput) => ({
+    ...fallbackInput,
+    ...Object.fromEntries(
+        Object.entries(rawInput).filter(([key, value]) => !SEARCH_FIELDS.includes(key) || !isBlank(value)),
+    ),
+});
 
 const loadInputFallback = async () => {
     try {
@@ -137,7 +138,7 @@ const loadInputFallback = async () => {
     }
 };
 
-const createHttpClient = (proxyUrl) => {
+const createHttpClient = () => {
     const state = {
         useHttp1Fallback: false,
         loggedHttp1Fallback: false,
@@ -146,10 +147,7 @@ const createHttpClient = (proxyUrl) => {
     return {
         impit: new Impit({
             browser: 'chrome',
-            ignoreTlsErrors: true,
-            ...(proxyUrl && { proxyUrl }),
         }),
-        http1Dispatcher: proxyUrl ? new ProxyAgent(proxyUrl) : undefined,
         shouldUseHttp1Fallback: () => state.useHttp1Fallback,
         activateHttp1Fallback: () => {
             state.useHttp1Fallback = true;
@@ -193,26 +191,66 @@ const fetchGraphql = async ({ client, url, payload, signal, timeoutMs }) => {
         headers: HTTP1_FALLBACK_HEADERS,
         body: JSON.stringify(payload),
         signal,
-        ...(client.http1Dispatcher && { dispatcher: client.http1Dispatcher }),
     });
 };
 
+const parseRetryAfterMs = (response) => {
+    const value = response?.headers?.get?.('retry-after');
+    if (!value) return null;
+
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, RETRY_MAX_DELAY_MS);
+
+    const timestamp = Date.parse(value);
+    if (!Number.isNaN(timestamp)) return Math.min(Math.max(timestamp - Date.now(), 0), RETRY_MAX_DELAY_MS);
+
+    return null;
+};
+
+const createRequestError = (message, { retryable = false, retryAfterMs = null } = {}) => {
+    const error = new Error(message);
+    error.retryable = retryable;
+    error.retryAfterMs = retryAfterMs;
+    return error;
+};
+
+const isTransientNetworkError = (error) => {
+    const code = String(error?.code || '').toUpperCase();
+    const name = String(error?.name || '');
+    const message = String(error?.message || error || '');
+
+    return (
+        name === 'AbortError' ||
+        name === 'TimeoutError' ||
+        ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
+        /(?:timed? ?out|socket hang up|connection reset|network error)/i.test(message)
+    );
+};
+
 const parseGraphqlResponse = async ({ response, endpointName }) => {
-    const contentType = response.headers.get('content-type') || '';
-    const body = contentType.includes('application/json') ? await response.json() : JSON.parse(await response.text());
+    const contentType = response?.headers?.get?.('content-type') || '';
+    let body;
 
-    if (Array.isArray(body)) {
-        if (body[0]?.errors?.length) {
-            throw new Error(`Endpoint ${endpointName} error: ${body[0].errors[0]?.message || 'Unknown error'}`);
-        }
-        return body[0]?.data ?? null;
+    try {
+        body = contentType.toLowerCase().includes('json') ? await response.json() : JSON.parse(await response.text());
+    } catch {
+        throw createRequestError(`Endpoint ${endpointName} returned an invalid JSON response.`);
     }
 
-    if (body?.errors?.length) {
-        throw new Error(`Endpoint ${endpointName} error: ${body.errors[0]?.message || 'Unknown error'}`);
+    const envelope = Array.isArray(body) ? body[0] : body;
+    if (!isRecord(envelope)) {
+        throw createRequestError(`Endpoint ${endpointName} returned an unexpected response shape.`);
     }
 
-    return body?.data ?? null;
+    if (Array.isArray(envelope.errors) && envelope.errors.length) {
+        throw createRequestError(`Endpoint ${endpointName} error: ${envelope.errors[0]?.message || 'Unknown error'}`);
+    }
+
+    if (!Object.hasOwn(envelope, 'data')) {
+        throw createRequestError(`Endpoint ${endpointName} response is missing data.`);
+    }
+
+    return envelope.data;
 };
 
 const requestGraphql = async ({ client, endpointName, payload, timeoutMs = 45000 }) => {
@@ -230,23 +268,36 @@ const requestGraphql = async ({ client, endpointName, payload, timeoutMs = 45000
                 signal: abortController.signal,
                 timeoutMs,
             });
+            const status = Number(response?.status);
 
-            if (response.status === 429) {
-                throw new Error(`Endpoint ${endpointName} was rate limited with status 429`);
+            if (!Number.isInteger(status)) {
+                throw createRequestError(`Endpoint ${endpointName} returned no valid HTTP status.`);
             }
 
-            if (response.status >= 400) {
-                throw new Error(`Endpoint ${endpointName} returned status ${response.status}`);
+            if (status === 429 || status >= 500) {
+                throw createRequestError(`Endpoint ${endpointName} returned status ${status}.`, {
+                    retryable: true,
+                    retryAfterMs: parseRetryAfterMs(response),
+                });
+            }
+
+            if (status < 200 || status >= 300) {
+                throw createRequestError(`Endpoint ${endpointName} returned status ${status}.`);
             }
 
             return await parseGraphqlResponse({ response, endpointName });
         } catch (error) {
             lastError = error;
-            if (attempt >= REQUEST_RETRIES) break;
-            const backoffMs = error?.message?.includes('429')
-                ? 900 * attempt + Math.floor(Math.random() * 500)
-                : 350 * attempt + Math.floor(Math.random() * 300);
-            await sleep(backoffMs);
+            const retryable = error?.retryable ?? isTransientNetworkError(error);
+            if (!retryable || attempt >= REQUEST_RETRIES) break;
+
+            const exponentialDelay = 350 * 2 ** (attempt - 1);
+            const jitter = Math.floor(Math.random() * 300);
+            const delayMs = Math.min(error.retryAfterMs ?? exponentialDelay + jitter, RETRY_MAX_DELAY_MS);
+            log.warning(
+                `Retrying ${endpointName} request (${attempt}/${REQUEST_RETRIES - 1}) in ${delayMs}ms: ${error.message}`,
+            );
+            await sleep(delayMs);
         } finally {
             clearTimeout(timeout);
         }
@@ -280,6 +331,8 @@ const resolveProductFromUrl = async ({ client, productUrl }) => {
         });
 
         const info = data?.productrevGetMiniProductInfo;
+        if (!isRecord(info)) throw new Error('Mini product lookup returned no product information.');
+
         const resolvedId = String(info?.product?.id || '') || directId;
         if (!resolvedId) {
             throw new Error('Could not resolve product ID from Tokopedia product URL.');
@@ -328,7 +381,12 @@ const fetchReviewsPage = async ({ client, productId, page, limit, sortBy }) => {
     };
 
     const data = await requestGraphql({ client, endpointName: 'productReviewList', payload });
-    return data?.productrevGetProductReviewList || null;
+    const reviewResult = data?.productrevGetProductReviewList;
+    if (!isRecord(reviewResult) || !Array.isArray(reviewResult.list)) {
+        throw new Error('Review endpoint returned no review list.');
+    }
+
+    return reviewResult;
 };
 
 const normalizeReviewItem = ({ rawReview, page, position, productContext, sortBy, sourceType }) => {
@@ -337,11 +395,13 @@ const normalizeReviewItem = ({ rawReview, page, position, productContext, sortBy
         ? new Date(reviewTimestampNumber * 1000).toISOString()
         : undefined;
 
-    const imageUrls = (rawReview?.imageAttachments || [])
+    const imageUrls = (Array.isArray(rawReview?.imageAttachments) ? rawReview.imageAttachments : [])
         .map((image) => cleanUrl(image?.imageUrl) || cleanUrl(image?.imageThumbnailUrl))
         .filter(Boolean);
 
-    const videoUrls = (rawReview?.videoAttachments || []).map((video) => cleanUrl(video?.videoUrl)).filter(Boolean);
+    const videoUrls = (Array.isArray(rawReview?.videoAttachments) ? rawReview.videoAttachments : [])
+        .map((video) => cleanUrl(video?.videoUrl))
+        .filter(Boolean);
 
     const out = {
         product_id: productContext.productId,
@@ -388,20 +448,14 @@ let runError = null;
 
 try {
     const rawInput = (await Actor.getInput()) || {};
-    const fallbackInput = hasUserProvidedValues(rawInput) ? {} : await loadInputFallback();
-    const input = {
-        ...fallbackInput,
-        ...rawInput,
-    };
+    const fallbackInput = hasUserProvidedSearch(rawInput) ? {} : await loadInputFallback();
+    const input = mergeInput(fallbackInput, rawInput);
+    const usingFallbackSearch = !hasUserProvidedSearch(rawInput) && hasUserProvidedSearch(fallbackInput);
 
-    const proxyConfiguration = input.proxyConfiguration
-        ? await Actor.createProxyConfiguration(input.proxyConfiguration)
-        : undefined;
-    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl('tokopedia-session') : undefined;
-    const client = createHttpClient(proxyUrl);
+    const client = createHttpClient();
 
-    const resultsWanted = toPositiveInt(input.results_wanted, 50);
-    const maxPages = toPositiveInt(input.max_pages, 10);
+    const resultsWanted = toPositiveInt(input.results_wanted, 20);
+    const maxPages = toPositiveInt(input.max_pages, 5);
     const sortBy =
         typeof input.sort_by === 'string' && input.sort_by.trim() ? input.sort_by.trim() : 'informative_score desc';
 
@@ -410,7 +464,7 @@ try {
 
     let sourceType = 'default_url';
     if (providedProductId) sourceType = 'product_id';
-    else if (providedProductUrl) sourceType = 'product_url';
+    else if (providedProductUrl && !usingFallbackSearch) sourceType = 'product_url';
 
     let productContext;
 
@@ -427,9 +481,13 @@ try {
             totalDiscussion: null,
         };
     } else {
+        if (!providedProductUrl) {
+            throw new Error('Provide a valid product_url or product_id.');
+        }
+
         productContext = await resolveProductFromUrl({
             client,
-            productUrl: providedProductUrl || DEFAULT_PRODUCT_URL,
+            productUrl: providedProductUrl,
         });
     }
 
@@ -446,15 +504,22 @@ try {
     let hasNext = true;
 
     for (let page = 1; page <= maxPages && saved < resultsWanted && hasNext; page++) {
-        const reviewResult = await fetchReviewsPage({
-            client,
-            productId: productContext.productId,
-            page,
-            limit: REVIEWS_PER_PAGE,
-            sortBy,
-        });
+        let reviewResult;
+        try {
+            reviewResult = await fetchReviewsPage({
+                client,
+                productId: productContext.productId,
+                page,
+                limit: REVIEWS_PER_PAGE,
+                sortBy,
+            });
+        } catch (error) {
+            if (saved === 0) throw error;
+            log.warning(`Stopping after page ${page} failed: ${error.message}`);
+            break;
+        }
 
-        const list = Array.isArray(reviewResult?.list) ? reviewResult.list : [];
+        const { list } = reviewResult;
         totalReviews = Number.isFinite(Number(reviewResult?.totalReviews))
             ? Number(reviewResult.totalReviews)
             : totalReviews;

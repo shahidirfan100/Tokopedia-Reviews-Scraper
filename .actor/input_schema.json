@@ -49,15 +49,6 @@
       "editor": "select",
       "default": "informative_score desc",
       "prefill": "informative_score desc"
-    },
-    "proxyConfiguration": {
-      "title": "Proxy configuration",
-      "type": "object",
-      "description": "Optional proxy settings for request routing.",
-      "editor": "proxy",
-      "default": {
-        "useApifyProxy": false
-      }
     }
   },
   "required": [],
