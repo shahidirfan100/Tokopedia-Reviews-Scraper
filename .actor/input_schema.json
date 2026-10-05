@@ -9,6 +9,7 @@
       "type": "string",
       "description": "Full URL of the Tokopedia product page. Supports normal, review, mobile, or shared product links, with or without query parameters.",
       "editor": "textfield",
+      "default": "https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327",
       "prefill": "https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327"
     },
     "results_wanted": {
@@ -17,7 +18,6 @@
       "description": "Maximum number of reviews to save.",
       "minimum": 1,
       "default": 20,
-      "prefill": 20,
       "editor": "number"
     },
     "max_pages": {
@@ -26,7 +26,6 @@
       "description": "Maximum number of review pages to fetch.",
       "minimum": 1,
       "default": 5,
-      "prefill": 5,
       "editor": "number"
     },
     "sort_by": {
@@ -40,10 +39,8 @@
         "rating asc"
       ],
       "editor": "select",
-      "default": "informative_score desc",
-      "prefill": "informative_score desc"
+      "default": "informative_score desc"
     }
   },
-  "required": ["product_url"],
   "additionalProperties": false
 }
