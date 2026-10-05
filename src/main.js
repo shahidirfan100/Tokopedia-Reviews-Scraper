@@ -31,7 +31,7 @@ const HTTP1_FALLBACK_HEADERS = {
 const REVIEWS_PER_PAGE = 10;
 const REQUEST_RETRIES = 4;
 const RETRY_MAX_DELAY_MS = 5000;
-const SEARCH_FIELDS = ['product_id', 'product_url', 'url', 'startUrl'];
+const SEARCH_FIELDS = ['product_url', 'url', 'startUrl'];
 
 await Actor.init();
 
@@ -85,15 +85,22 @@ const normalizeTokopediaHost = (hostname) => hostname === 'tokopedia.com' || hos
 const normalizeProductUrl = (value) => {
     if (!value || typeof value !== 'string') return null;
 
+    let candidate = value.trim();
+    if (!candidate) return null;
+
+    if (!/^https?:\/\//i.test(candidate)) {
+        candidate = `https://${candidate.replace(/^\/+/, '')}`;
+    }
+
     try {
-        const parsed = new URL(value, 'https://www.tokopedia.com');
-        if (!normalizeTokopediaHost(parsed.hostname)) return null;
+        const parsed = new URL(candidate);
+        if (!normalizeTokopediaHost(parsed.hostname.toLowerCase())) return null;
 
         let pathname = parsed.pathname || '/';
         pathname = pathname.replace(/\/review\/?$/i, '');
         pathname = pathname.replace(/\/+$/, '');
 
-        if (!pathname || pathname === '') return null;
+        if (!pathname || pathname === '/') return null;
         return `${parsed.origin}${pathname}`;
     } catch {
         return null;
@@ -138,19 +145,36 @@ const loadInputFallback = async () => {
     }
 };
 
+const IMPIT_PROFILE_ROTATION = ['chrome', 'chrome136', 'chrome124', 'firefox133', 'ios18'];
+
 const createHttpClient = () => {
     const state = {
+        profileIndex: 0,
         useHttp1Fallback: false,
         loggedHttp1Fallback: false,
+        instances: new Map(),
+    };
+
+    const getInstance = (profile) => {
+        if (!state.instances.has(profile)) {
+            state.instances.set(profile, new Impit({ browser: profile, vanillaFallback: true }));
+        }
+        return state.instances.get(profile);
     };
 
     return {
-        impit: new Impit({
-            browser: 'chrome',
-        }),
+        get impit() {
+            return getInstance(IMPIT_PROFILE_ROTATION[state.profileIndex]);
+        },
+        currentProfile: () => IMPIT_PROFILE_ROTATION[state.profileIndex],
         shouldUseHttp1Fallback: () => state.useHttp1Fallback,
         activateHttp1Fallback: () => {
             state.useHttp1Fallback = true;
+        },
+        rotateProfile: () => {
+            if (state.profileIndex >= IMPIT_PROFILE_ROTATION.length - 1) return false;
+            state.profileIndex += 1;
+            return true;
         },
         shouldLogHttp1Fallback: () => {
             if (state.loggedHttp1Fallback) return false;
@@ -160,28 +184,43 @@ const createHttpClient = () => {
     };
 };
 
-const isImpitHttp2Reset = (error) => {
-    const message = String(error?.message || error || '');
-    return message.includes('Http2') && message.includes('Reset');
+const isImpitProfileReset = (error) => {
+    const message = String(error?.message || error || '').toLowerCase();
+    if (message.includes('http2') && message.includes('reset')) return true;
+    if (message.includes('hyper::error')) return true;
+    if (message.includes('internal_error') && message.includes('http')) return true;
+    return false;
 };
 
 const fetchGraphql = async ({ client, url, payload, signal, timeoutMs }) => {
     if (!client.shouldUseHttp1Fallback()) {
-        try {
-            return await client.impit.fetch(url, {
-                method: 'POST',
-                headers: BASE_HEADERS,
-                body: JSON.stringify(payload),
-                signal,
-                timeout: timeoutMs,
-            });
-        } catch (error) {
-            if (!isImpitHttp2Reset(error)) throw error;
-            client.activateHttp1Fallback();
-            if (client.shouldLogHttp1Fallback()) {
-                log.warning(
-                    'Tokopedia reset the impit HTTP/2 stream. Switching this run to HTTP/1-compatible mobile-web requests.',
-                );
+        while (true) {
+            const profile = client.currentProfile();
+            try {
+                return await client.impit.fetch(url, {
+                    method: 'POST',
+                    headers: BASE_HEADERS,
+                    body: JSON.stringify(payload),
+                    signal,
+                    timeout: timeoutMs,
+                });
+            } catch (error) {
+                if (!isImpitProfileReset(error)) throw error;
+
+                if (client.rotateProfile()) {
+                    log.warning(
+                        `Tokopedia reset the impit HTTP/2 stream for profile "${profile}". Retrying with "${client.currentProfile()}".`,
+                    );
+                    continue;
+                }
+
+                client.activateHttp1Fallback();
+                if (client.shouldLogHttp1Fallback()) {
+                    log.warning(
+                        'Every impit browser profile was reset by Tokopedia. Switching this run to HTTP/1-compatible mobile-web requests.',
+                    );
+                }
+                break;
             }
         }
     }
@@ -207,10 +246,11 @@ const parseRetryAfterMs = (response) => {
     return null;
 };
 
-const createRequestError = (message, { retryable = false, retryAfterMs = null } = {}) => {
+const createRequestError = (message, { retryable = false, retryAfterMs = null, rotateProfile = false } = {}) => {
     const error = new Error(message);
     error.retryable = retryable;
     error.retryAfterMs = retryAfterMs;
+    error.rotateProfile = rotateProfile;
     return error;
 };
 
@@ -220,10 +260,11 @@ const isTransientNetworkError = (error) => {
     const message = String(error?.message || error || '');
 
     return (
-        name === 'AbortError' ||
-        name === 'TimeoutError' ||
+        ['AbortError', 'TimeoutError', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout'].includes(name) ||
+        ['NetworkError', 'ConnectError', 'ReadError', 'WriteError', 'CloseError', 'TransportError'].includes(name) ||
         ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT'].includes(code) ||
-        /(?:timed? ?out|socket hang up|connection reset|network error)/i.test(message)
+        /(?:timed? ?out|socket hang up|connection reset|network error)/i.test(message) ||
+        isImpitProfileReset(error)
     );
 };
 
@@ -234,7 +275,10 @@ const parseGraphqlResponse = async ({ response, endpointName }) => {
     try {
         body = contentType.toLowerCase().includes('json') ? await response.json() : JSON.parse(await response.text());
     } catch {
-        throw createRequestError(`Endpoint ${endpointName} returned an invalid JSON response.`);
+        throw createRequestError(`Endpoint ${endpointName} returned an invalid JSON response.`, {
+            retryable: true,
+            rotateProfile: true,
+        });
     }
 
     const envelope = Array.isArray(body) ? body[0] : body;
@@ -290,6 +334,12 @@ const requestGraphql = async ({ client, endpointName, payload, timeoutMs = 45000
             lastError = error;
             const retryable = error?.retryable ?? isTransientNetworkError(error);
             if (!retryable || attempt >= REQUEST_RETRIES) break;
+
+            if (error?.rotateProfile && client.rotateProfile()) {
+                log.warning(
+                    `Endpoint ${endpointName} returned an unusable response. Retrying with impit profile "${client.currentProfile()}".`,
+                );
+            }
 
             const exponentialDelay = 350 * 2 ** (attempt - 1);
             const jitter = Math.floor(Math.random() * 300);
@@ -350,9 +400,13 @@ const resolveProductFromUrl = async ({ client, productUrl }) => {
             totalDiscussion: Number.isFinite(Number(info?.totalDiscussion)) ? Number(info.totalDiscussion) : null,
         };
     } catch (error) {
-        if (!directId) throw error;
+        if (!directId) {
+            throw new Error(
+                `Product not found at the provided URL. Make sure it is a valid, active Tokopedia product page. (${error.message})`,
+            );
+        }
 
-        log.warning(`Mini product lookup failed, using product ID parsed from URL. ${error.message}`);
+        log.warning(`Product details lookup failed, using the identifier parsed from the URL. ${error.message}`);
         return {
             productId: directId,
             productUrl: normalizedUrl,
@@ -363,6 +417,7 @@ const resolveProductFromUrl = async ({ client, productUrl }) => {
             productPrice: null,
             totalSoldFmt: null,
             totalDiscussion: null,
+            resolvedViaFallback: true,
         };
     }
 };
@@ -459,44 +514,20 @@ try {
     const sortBy =
         typeof input.sort_by === 'string' && input.sort_by.trim() ? input.sort_by.trim() : 'informative_score desc';
 
-    const providedProductId = String(input.product_id || '').trim();
     const providedProductUrl = normalizeProductUrl(input.product_url || input.url || input.startUrl || null);
+    const sourceType = usingFallbackSearch ? 'default_url' : 'product_url';
 
-    let sourceType = 'default_url';
-    if (providedProductId) sourceType = 'product_id';
-    else if (providedProductUrl && !usingFallbackSearch) sourceType = 'product_url';
-
-    let productContext;
-
-    if (providedProductId) {
-        productContext = {
-            productId: providedProductId,
-            productUrl: providedProductUrl || null,
-            productName: null,
-            shopId: null,
-            shopName: null,
-            productStatus: null,
-            productPrice: null,
-            totalSoldFmt: null,
-            totalDiscussion: null,
-        };
-    } else {
-        if (!providedProductUrl) {
-            throw new Error('Provide a valid product_url or product_id.');
-        }
-
-        productContext = await resolveProductFromUrl({
-            client,
-            productUrl: providedProductUrl,
-        });
+    if (!providedProductUrl) {
+        throw new Error('Provide a valid Tokopedia product URL.');
     }
+
+    const productContext = await resolveProductFromUrl({
+        client,
+        productUrl: providedProductUrl,
+    });
 
     if (!productContext?.productId) {
-        throw new Error('Unable to determine Tokopedia product ID from the provided input.');
-    }
-
-    if (!productContext.productUrl && productContext.productId) {
-        log.warning('Product URL is unavailable. Reviews will still be scraped using product ID.');
+        throw new Error('Unable to determine Tokopedia product ID from the provided product URL.');
     }
 
     let saved = 0;
@@ -514,7 +545,12 @@ try {
                 sortBy,
             });
         } catch (error) {
-            if (saved === 0) throw error;
+            if (saved === 0) {
+                if (productContext.resolvedViaFallback && /not found/i.test(error.message)) {
+                    throw new Error('Product not found or no longer available at the provided URL.');
+                }
+                throw error;
+            }
             log.warning(`Stopping after page ${page} failed: ${error.message}`);
             break;
         }

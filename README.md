@@ -1,13 +1,13 @@
 ## What does Tokopedia Reviews Scraper do?
 
-Tokopedia Reviews Scraper collects customer reviews and ratings from Tokopedia product pages and saves them as structured, analysis-ready dataset items. Run it with a Tokopedia product URL or a direct product ID, and the Actor returns review text, star ratings, purchased variants, buyer names, media counts, review timestamps, and more in a single run. The output is ready for product research, competitor monitoring, seller feedback tracking, and customer sentiment analysis.
+Tokopedia Reviews Scraper collects customer reviews and ratings from Tokopedia product pages and saves them as structured, analysis-ready dataset items. Run it with a Tokopedia product URL, and the Actor returns review text, star ratings, purchased variants, buyer names, media counts, review timestamps, and more in a single run. The output is ready for product research, competitor monitoring, seller feedback tracking, and customer sentiment analysis.
 
 Tokopedia is one of the largest online marketplaces in Indonesia, so review volume on popular products can be high. This Actor turns that volume into a clean dataset you can filter, sort, export, and reuse instead of scrolling through pages of feedback manually.
 
 ## Why use Tokopedia Reviews Scraper?
 
 - **Structured review datasets** - Turn scattered Tokopedia review pages into clean JSON, CSV, or Excel rows without manual copy-paste.
-- **Simple setup** - Provide a product URL or product ID and choose how many reviews to collect. No code required.
+- **Simple setup** - Paste any Tokopedia product URL and choose how many reviews to collect. No code required.
 - **Pagination and volume control** - Use `results_wanted` and `max_pages` to keep test runs fast or to scale up for larger collections.
 - **Flexible review sorting** - Choose the default "most informative" order, newest first, highest rating, or lowest rating to fit your analysis.
 - **Clean output** - Null and empty values are removed before saving, so your dataset stays tidy for downstream use.
@@ -36,30 +36,32 @@ Each dataset item contains one review with product context, review content, and 
 | `review_time_relative` | Relative time label such as "3 bulan lalu" |
 | `review_time_iso` | Review timestamp in ISO format when available |
 | `sort_by` | Sort option used in the run |
-| `source_type` | Input source used (`product_id`, `product_url`, `default_url`) |
+| `source_type` | Input source used (`product_url`, `default_url`) |
 | `fetched_at` | Data collection timestamp |
 
 ## How to use Tokopedia Reviews Scraper
 
 1. Open the Actor on Apify Store.
-2. Paste a Tokopedia product URL into `product_url`, or add a direct `product_id` if you have one.
+2. Paste a Tokopedia product URL into `product_url`.
 3. Set the maximum number of reviews with `results_wanted` and the maximum pages with `max_pages`.
 4. Choose a `sort_by` order.
 5. Run the Actor.
 6. Download the dataset or connect it to your workflow through the Apify API.
 
-Input priority when both are filled:
+Accepted URL formats (the Actor normalizes them automatically):
 
-1. `product_id`
-2. `product_url`
-3. A built-in sample product URL when user input is empty
+- Standard product links: `https://www.tokopedia.com/shop/product-name-1234567890`
+- Review links: `https://www.tokopedia.com/shop/product-name-1234567890/review`
+- Links with query parameters or fragments
+- Links without `www`, without `https://`, or with extra spaces
+- Mobile links such as `https://m.tokopedia.com/...`
+- Shared Shop links such as `https://shop-id.tokopedia.com/pdp/...`
 
 ## Input Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `product_url` | String | No | Sample product URL | Tokopedia product URL. Recommended input. |
-| `product_id` | String | No | - | Direct Tokopedia product ID. Takes priority over `product_url` when both are provided. |
+| `product_url` | String | Yes | - | Full URL of the Tokopedia product page. Messy or shared links are normalized automatically. |
 | `results_wanted` | Integer | No | `20` | Maximum number of reviews to save. |
 | `max_pages` | Integer | No | `5` | Maximum number of review pages to fetch. |
 | `sort_by` | String | No | `informative_score desc` | Review sort order. Options: `informative_score desc`, `create_time desc`, `rating desc`, `rating asc`. |
@@ -68,7 +70,7 @@ Input priority when both are filled:
 
 ### Basic Product URL Run
 
-Collect the first batch of reviews from a Tokopedia product page using the recommended input:
+Collect the first batch of reviews from a Tokopedia product page:
 
 ```json
 {
@@ -78,13 +80,13 @@ Collect the first batch of reviews from a Tokopedia product page using the recom
 }
 ```
 
-### Product ID Run
+### Review Page or Messy URL
 
-Run with a direct product ID for consistent targeting in automation pipelines:
+The Actor accepts review-page links, links with tracking parameters, and links without `www`:
 
 ```json
 {
-  "product_id": "100018999468",
+  "product_url": "www.tokopedia.com/keeping/keeping-sepatu-sneakers-pria-1729774680361436468/review?extParam=ivf%7C",
   "results_wanted": 50,
   "max_pages": 10,
   "sort_by": "informative_score desc"
@@ -147,7 +149,7 @@ Focus on positive feedback to study what buyers appreciate most:
 
 - Start with `results_wanted` between 20 and 50 to validate output before running larger collections.
 - Use product URLs that already have visible customer reviews. Products with no reviews will return an empty dataset.
-- For scheduled or automated pipelines, prefer `product_id` because it targets the product directly and does not depend on URL formatting.
+- For scheduled or automated pipelines, always pass the full product page URL so the Actor can resolve the correct product and metadata.
 
 - Combine a sensible `max_pages` limit with scheduling so recurring runs stay predictable and low-cost.
 - Some reviews have no text, images, or timestamps. Missing fields are expected when the source does not publish that information, and empty values are removed from the dataset.
@@ -175,9 +177,9 @@ Connect your review dataset with:
 
 Yes. Apify datasets can be downloaded in CSV, Excel, JSON, XML, and other supported formats from the dataset preview.
 
-### Can I run this Actor with only a product ID?
+### Which product URL formats are supported?
 
-Yes. `product_id` is supported and takes priority when both an ID and a URL are provided.
+Any public Tokopedia product link works. The Actor trims extra spaces, adds the scheme when missing, keeps the path, and removes the `/review` suffix and tracking parameters. Standard, review, mobile, and shared Shop links all resolve to the same product.
 
 ### Why do some runs return fewer reviews than requested?
 

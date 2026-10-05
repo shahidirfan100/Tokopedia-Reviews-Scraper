@@ -7,16 +7,9 @@
     "product_url": {
       "title": "Product URL",
       "type": "string",
-      "description": "Tokopedia product URL. Recommended input.",
+      "description": "Full URL of the Tokopedia product page. Supports normal, review, mobile, or shared product links, with or without query parameters.",
       "editor": "textfield",
       "prefill": "https://www.tokopedia.com/toko-hijab-jasmine/pashmina-kaos-bahan-cotton-rayon-bahan-adem-ringan-dan-lembut-pashmina-kaos-jasmine-1729666273262209327"
-    },
-    "product_id": {
-      "title": "Product ID",
-      "type": "string",
-      "description": "Direct Tokopedia product ID. If provided, this takes priority over Product URL.",
-      "editor": "textfield",
-      "prefill": ""
     },
     "results_wanted": {
       "title": "Maximum reviews",
@@ -51,6 +44,6 @@
       "prefill": "informative_score desc"
     }
   },
-  "required": [],
+  "required": ["product_url"],
   "additionalProperties": false
 }
