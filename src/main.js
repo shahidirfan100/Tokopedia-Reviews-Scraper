@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { Actor, log } from 'apify';
 import { Dataset, sleep } from 'crawlee';
 import { Impit } from 'impit';
-import { fetch as undiciFetch } from 'undici';
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
 
 const TOKOPEDIA_GQL_BASE = 'https://gql.tokopedia.com/graphql';
 
@@ -147,19 +147,52 @@ const loadInputFallback = async () => {
 
 const IMPIT_PROFILE_ROTATION = ['chrome', 'chrome136', 'chrome124', 'firefox133', 'ios18'];
 
-const createHttpClient = () => {
+const createHttpClient = ({ proxyConfiguration } = {}) => {
     const state = {
         profileIndex: 0,
         useHttp1Fallback: false,
         loggedHttp1Fallback: false,
         instances: new Map(),
+        proxyUrl: null,
+        dispatcher: null,
+        loggedProxyFailure: false,
+    };
+
+    const applyProxy = (proxyUrl) => {
+        state.proxyUrl = proxyUrl || null;
+        state.dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : null;
+    };
+
+    const refreshProxy = async () => {
+        if (!proxyConfiguration) return false;
+
+        try {
+            const url = await proxyConfiguration.newUrl();
+            applyProxy(url);
+            return Boolean(url);
+        } catch (error) {
+            applyProxy(null);
+            if (!state.loggedProxyFailure) {
+                state.loggedProxyFailure = true;
+                log.warning(`Could not obtain a proxy URL; continuing without proxy. ${error.message}`);
+            }
+            return false;
+        }
     };
 
     const getInstance = (profile) => {
-        if (!state.instances.has(profile)) {
-            state.instances.set(profile, new Impit({ browser: profile, vanillaFallback: true }));
+        const key = `${profile}::${state.proxyUrl || 'direct'}`;
+        if (!state.instances.has(key)) {
+            state.instances.set(
+                key,
+                new Impit({
+                    browser: profile,
+                    vanillaFallback: true,
+                    ...(state.proxyUrl ? { proxyUrl: state.proxyUrl } : {}),
+                }),
+            );
         }
-        return state.instances.get(profile);
+        return state.instances.get(key);
     };
 
     return {
@@ -181,6 +214,9 @@ const createHttpClient = () => {
             state.loggedHttp1Fallback = true;
             return true;
         },
+        refreshProxy,
+        getDispatcher: () => state.dispatcher,
+        hasProxy: () => Boolean(state.proxyUrl),
     };
 };
 
@@ -225,11 +261,14 @@ const fetchGraphql = async ({ client, url, payload, signal, timeoutMs }) => {
         }
     }
 
+    const dispatcher = client.getDispatcher();
+
     return await undiciFetch(url, {
         method: 'POST',
         headers: HTTP1_FALLBACK_HEADERS,
         body: JSON.stringify(payload),
         signal,
+        ...(dispatcher ? { dispatcher } : {}),
     });
 };
 
@@ -287,7 +326,14 @@ const parseGraphqlResponse = async ({ response, endpointName }) => {
     }
 
     if (Array.isArray(envelope.errors) && envelope.errors.length) {
-        throw createRequestError(`Endpoint ${endpointName} error: ${envelope.errors[0]?.message || 'Unknown error'}`);
+        const message = envelope.errors[0]?.message || 'Unknown error';
+        const retryable = /internal|server|try again|timeout|timed out|unavailable|temporar|too many|rate.?limit/i.test(
+            message,
+        );
+        throw createRequestError(`Endpoint ${endpointName} error: ${message}`, {
+            retryable,
+            rotateProfile: retryable,
+        });
     }
 
     if (!Object.hasOwn(envelope, 'data')) {
@@ -318,9 +364,10 @@ const requestGraphql = async ({ client, endpointName, payload, timeoutMs = 45000
                 throw createRequestError(`Endpoint ${endpointName} returned no valid HTTP status.`);
             }
 
-            if (status === 429 || status >= 500) {
+            if (status === 403 || status === 429 || status >= 500) {
                 throw createRequestError(`Endpoint ${endpointName} returned status ${status}.`, {
                     retryable: true,
+                    rotateProfile: status === 403,
                     retryAfterMs: parseRetryAfterMs(response),
                 });
             }
@@ -339,6 +386,10 @@ const requestGraphql = async ({ client, endpointName, payload, timeoutMs = 45000
                 log.warning(
                     `Endpoint ${endpointName} returned an unusable response. Retrying with impit profile "${client.currentProfile()}".`,
                 );
+            }
+
+            if (client.hasProxy()) {
+                await client.refreshProxy();
             }
 
             const exponentialDelay = 350 * 2 ** (attempt - 1);
@@ -507,7 +558,22 @@ try {
     const input = mergeInput(fallbackInput, rawInput);
     const usingFallbackSearch = !hasUserProvidedSearch(rawInput) && hasUserProvidedSearch(fallbackInput);
 
-    const client = createHttpClient();
+    const proxyInput = input.proxyConfiguration;
+    const proxyEnabled =
+        isRecord(proxyInput) &&
+        ((Array.isArray(proxyInput.proxyUrls) && proxyInput.proxyUrls.length > 0) || proxyInput.useApifyProxy === true);
+
+    let proxyConfiguration;
+    if (proxyEnabled) {
+        try {
+            proxyConfiguration = await Actor.createProxyConfiguration(proxyInput);
+        } catch (error) {
+            log.warning(`Proxy configuration was ignored; continuing without proxy. ${error.message}`);
+        }
+    }
+
+    const client = createHttpClient({ proxyConfiguration });
+    await client.refreshProxy();
 
     const resultsWanted = toPositiveInt(input.results_wanted, 20);
     const maxPages = toPositiveInt(input.max_pages, 5);

@@ -65,6 +65,7 @@ Accepted URL formats (the Actor normalizes them automatically):
 | `results_wanted` | Integer | No | `20` | Maximum number of reviews to save. |
 | `max_pages` | Integer | No | `5` | Maximum number of review pages to fetch. |
 | `sort_by` | String | No | `informative_score desc` | Review sort order. Options: `informative_score desc`, `create_time desc`, `rating desc`, `rating asc`. |
+| `proxyConfiguration` | Object | No | No proxy | Optional proxy for requests. Choose no proxy, Apify Proxy, or custom proxy URLs. When enabled, every request is routed through the proxy and the proxy identity is rotated on retries. |
 
 ## Usage Examples
 

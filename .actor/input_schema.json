@@ -40,6 +40,13 @@
       ],
       "editor": "select",
       "default": "informative_score desc"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Optional. Use no proxy (default), Apify Proxy, or custom proxy URLs. When enabled, the Actor routes every request through the proxy and rotates it on retries.",
+      "default": {},
+      "editor": "proxy"
     }
   },
   "additionalProperties": false
